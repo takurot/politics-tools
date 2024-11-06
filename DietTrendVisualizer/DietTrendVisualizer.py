@@ -2,7 +2,8 @@ import os
 import requests
 import matplotlib.pyplot as plt
 from openai import OpenAI
-from collections import Counter
+from collections import Counter, defaultdict
+from tqdm import tqdm
 import time
 
 # OpenAIクライアントの設定
@@ -14,8 +15,7 @@ if not client.api_key:
 
 def fetch_diet_records(year):
     """
-    指定年の国会会議録を取得する関数。
-    会議録の議事内容（発言内容）を含むデータを取得します。
+    指定年の国会会議録を取得し、日ごとの発言内容をまとめる関数。
     """
     url = f'https://kokkai.ndl.go.jp/api/meeting'
     params = {
@@ -25,7 +25,7 @@ def fetch_diet_records(year):
         'from': f'{year}-01-01',
         'until': f'{year}-12-31'
     }
-    records = []
+    records = defaultdict(str)
     while True:
         response = requests.get(url, params=params)
         if response.status_code != 200:
@@ -33,21 +33,23 @@ def fetch_diet_records(year):
         data = response.json().get('meetingRecord', [])
         if not data:
             break
-        records.extend(data)
+
+        for record in data:
+            date = record.get('date')
+            speeches = record.get('speechRecord', [])
+            for speech in speeches:
+                records[date] += speech.get('speech', '') + "\n"
         
-        # 次の開始位置を設定
         params['startRecord'] += len(data)
-        
-        # APIアクセスの間に少し待機
         time.sleep(1)
-        
+    
     return records
 
-def extract_topics(speech_text):
+def extract_topics(speech_text, date):
     """
-    OpenAI APIを使って発言内容から主要トピックを抽出し、マークダウン形式で保存。
+    OpenAI APIを使って日ごとの発言内容から主要トピックを抽出し、マークダウン形式で保存。
     """
-    prompt = f"以下の発言内容から主要な政策トピックを抽出してください:\n\n{speech_text}\n\nトピック:"
+    prompt = f"以下は、{date}に行われた発言の内容です。主要な政策トピックを抽出してください:\n\n{speech_text}\n\nトピック:"
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
@@ -61,22 +63,20 @@ def extract_topics(speech_text):
     
     # トピックをマークダウン形式で保存
     with open("diet_topics_summary.md", "a", encoding="utf-8") as file:
-        file.write(f"### 発言内容\n{speech_text}\n\n")
+        file.write(f"### 日付: {date}\n")
         file.write(f"**抽出されたトピック**: {', '.join(topics)}\n\n")
     
     return topics
 
 def analyze_trends(records):
     """
-    取得した会議録データを使って発言内容からトピックを分析し、出現頻度をカウントする。
+    日ごとの発言内容をOpenAI APIに渡してトピックを分析し、出現頻度をカウントする。
+    tqdmで進捗を表示。
     """
     topic_counter = Counter()
-    for record in records:
-        for speech in record.get('speechRecord', []):
-            speech_text = speech.get('speech', '')
-            if speech_text:
-                topics = extract_topics(speech_text)
-                topic_counter.update(topics)
+    for date, speeches in tqdm(records.items(), desc="Processing daily records"):
+        topics = extract_topics(speeches, date)
+        topic_counter.update(topics)
     return topic_counter
 
 def plot_trend_map(topic_counter, year):
